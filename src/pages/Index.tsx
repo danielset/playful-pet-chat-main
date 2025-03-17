@@ -53,10 +53,10 @@ const Index = () => {
           <div className="text-center mb-4">
             <p className="text-gray-600">
               {isRecording 
-                ? "I'm listening..." 
+                ? "I'm listening... Click to stop" 
                 : isLoading 
                   ? "Thinking..." 
-                  : "Press and hold to talk"}
+                  : "Click to start talking"}
             </p>
           </div>
           

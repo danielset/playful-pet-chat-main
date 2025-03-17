@@ -1,4 +1,3 @@
-
 import type { Config } from "tailwindcss";
 
 export default {
@@ -71,6 +70,7 @@ export default {
 					yellow: '#FCD34D',
 					pink: '#F9A8D4',
 					purple: '#A78BFA',
+					red: '#F87171',
 					background: '#F8FAFC'
 				}
 			},
