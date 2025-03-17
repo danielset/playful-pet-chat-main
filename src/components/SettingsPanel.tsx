@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, RefObject } from 'react';
 import { 
   Drawer,
   DrawerContent,
@@ -33,11 +33,13 @@ export interface ChildSettings {
 interface SettingsPanelProps {
   settings: ChildSettings;
   onSettingsChange: (settings: ChildSettings) => void;
+  buttonRef?: RefObject<HTMLButtonElement>;
 }
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ 
   settings, 
-  onSettingsChange 
+  onSettingsChange,
+  buttonRef
 }) => {
   const [formState, setFormState] = useState<ChildSettings>(settings);
   const envApiKey = getOpenAIApiKey();
@@ -64,6 +66,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     <Drawer>
       <DrawerTrigger asChild>
         <Button 
+          ref={buttonRef}
           variant="outline" 
           size="icon" 
           className="absolute top-4 right-4 rounded-full bg-glass border-none"

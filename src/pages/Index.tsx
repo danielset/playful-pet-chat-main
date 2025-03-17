@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import TalkButton from '@/components/TalkButton';
 import SettingsPanel, { ChildSettings } from '@/components/SettingsPanel';
 import useAudioChat from '@/hooks/useAudioChat';
+import { toast } from "sonner";
+import { getOpenAIApiKey, isOpenAIApiKeyConfigured } from '@/lib/config/env';
 
 const Index = () => {
   const [settings, setSettings] = useState<ChildSettings>(() => {
@@ -30,12 +32,49 @@ const Index = () => {
     };
   });
 
+  // Reference to settings drawer toggle button
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  
   const { isRecording, isLoading, startRecording, stopRecording } = useAudioChat(settings);
 
   // Save settings to localStorage whenever they change
   useEffect(() => {
     localStorage.setItem('childSettings', JSON.stringify(settings));
   }, [settings]);
+
+  // Check if essential settings are configured
+  const areSettingsConfigured = () => {
+    // Check if API key is available either in env or settings
+    const hasApiKey = isOpenAIApiKeyConfigured() || !!settings.apiKey;
+    
+    // Additional settings check if needed (e.g., name)
+    // const hasName = !!settings.name;
+    
+    return hasApiKey;
+  };
+  
+  // Handle start recording with settings check
+  const handleStartRecording = () => {
+    if (!areSettingsConfigured()) {
+      // Show toast notification
+      toast.info("Please configure your settings before recording", {
+        description: "Opening settings panel...",
+        duration: 3000,
+      });
+      
+      // Programmatically click the settings button
+      setTimeout(() => {
+        if (settingsButtonRef.current) {
+          settingsButtonRef.current.click();
+        }
+      }, 500);
+      
+      return;
+    }
+    
+    // If settings are configured, start recording
+    startRecording();
+  };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center relative p-4 overflow-hidden">
@@ -63,14 +102,18 @@ const Index = () => {
           <TalkButton
             isRecording={isRecording}
             isLoading={isLoading}
-            onStart={startRecording}
+            onStart={handleStartRecording}
             onStop={stopRecording}
           />
         </div>
       </main>
       
       {/* Settings panel */}
-      <SettingsPanel settings={settings} onSettingsChange={setSettings} />
+      <SettingsPanel 
+        settings={settings} 
+        onSettingsChange={setSettings} 
+        buttonRef={settingsButtonRef}
+      />
     </div>
   );
 };

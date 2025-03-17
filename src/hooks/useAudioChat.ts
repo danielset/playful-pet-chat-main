@@ -47,9 +47,25 @@ const useAudioChat = (settings: ChildSettings) => {
         throw new Error("Please provide an OpenAI API key in the settings");
       }
       
+      // For iOS/Safari, we need to ensure we're sending a compatible format
+      // The Whisper API accepts m4a, mp3, mp4, mpeg, mpga, wav, and webm formats
+      let processedBlob = blob;
+      let filename = 'recording.webm';
+      
+      // Determine the appropriate file extension based on MIME type
+      if (blob.type.includes('mp4')) {
+        filename = 'recording.mp4';
+      } else if (blob.type.includes('mp3')) {
+        filename = 'recording.mp3';
+      } else if (blob.type.includes('wav')) {
+        filename = 'recording.wav';
+      }
+      
+      console.log(`Sending audio with filename: ${filename} and type: ${blob.type}`);
+      
       // 1. First convert audio to text using OpenAI Whisper API
       const formData = new FormData();
-      formData.append('file', blob, 'recording.webm');
+      formData.append('file', processedBlob, filename);
       formData.append('model', 'whisper-1');
       
       // If language is specified, add it to the request
@@ -58,6 +74,9 @@ const useAudioChat = (settings: ChildSettings) => {
       } else {
         formData.append('language', 'en');
       }
+      
+      // Log formData details for debugging
+      console.log(`Sending audio file of size: ${processedBlob.size} bytes`);
       
       const transcriptionResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
         method: 'POST',
@@ -69,6 +88,7 @@ const useAudioChat = (settings: ChildSettings) => {
       
       if (!transcriptionResponse.ok) {
         const errorData = await transcriptionResponse.json();
+        console.error("Transcription error details:", errorData);
         throw new Error(`Error transcribing audio: ${errorData.error?.message || 'Unknown error'}`);
       }
       
@@ -277,7 +297,6 @@ const useAudioChat = (settings: ChildSettings) => {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 44100,
         }
       };
       
@@ -288,16 +307,17 @@ const useAudioChat = (settings: ChildSettings) => {
       
       // For Safari/iOS, create a silent recorder to fully initialize the system
       try {
-        const testRecorder = new MediaRecorder(stream, {
-          // Use different mime type for iOS/Safari
-          mimeType: isSafari() ? 'audio/mp4' : 'audio/webm'
-        });
+        // Try the most compatible format for iOS first
+        const mimeType = isIOS() ? 'audio/mp4' : 'audio/webm';
+        console.log(`Using mime type: ${mimeType} for test recorder`);
+        
+        const testRecorder = new MediaRecorder(stream, { mimeType });
         testRecorder.start();
         setTimeout(() => {
           testRecorder.stop();
         }, 100);
       } catch (e) {
-        console.warn('Test recorder failed, trying alternative format', e);
+        console.warn('Test recorder failed, trying without mime type', e);
         // Try without mimeType specification (let browser choose)
         const testRecorder = new MediaRecorder(stream);
         testRecorder.start();
@@ -319,7 +339,7 @@ const useAudioChat = (settings: ChildSettings) => {
     audioChunksRef.current = [];
     
     try {
-      console.log(`Starting recording (first time: ${isFirstRecordRef.current})`);
+      console.log(`Starting recording (first time: ${isFirstRecordRef.current}, iOS: ${isIOS()}, Safari: ${isSafari()})`);
       
       // iOS specific handling
       if (isIOS() && !audioInitializedRef.current) {
@@ -348,19 +368,57 @@ const useAudioChat = (settings: ChildSettings) => {
         }
       }
       
+      let mimeType: string;
+      
       try {
-        // Try to create MediaRecorder with specific mime type
-        const mimeType = isSafari() ? 'audio/mp4' : 'audio/webm';
-        mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+        // Choose the most compatible format based on platform
+        // For iOS/Safari, use more common formats that Whisper accepts
+        if (isIOS()) {
+          // Try MP4 format for iOS
+          mimeType = 'audio/mp4';
+          console.log(`Attempting to use mime type: ${mimeType}`);
+          mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+        } else {
+          // Use WebM for everything else (Chrome, Firefox, etc)
+          mimeType = 'audio/webm';
+          console.log(`Attempting to use mime type: ${mimeType}`);
+          mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+        }
       } catch (e) {
-        console.warn("Failed to create MediaRecorder with specific mime type, trying default", e);
-        // Fallback to browser default
-        mediaRecorderRef.current = new MediaRecorder(stream);
+        console.warn(`Failed to create MediaRecorder with specified mime type, trying alternative options`, e);
+        
+        // Try alternative formats in order of preference
+        const formats = isIOS() 
+          ? ['audio/mp4', 'audio/mpeg', 'audio/mp3', 'audio/wav'] 
+          : ['audio/webm', 'audio/ogg', 'audio/wav'];
+        
+        let success = false;
+        
+        for (const format of formats) {
+          try {
+            console.log(`Trying format: ${format}`);
+            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: format });
+            success = true;
+            mimeType = format;
+            console.log(`Successfully created MediaRecorder with ${format}`);
+            break;
+          } catch (formatError) {
+            console.warn(`Format ${format} not supported`);
+          }
+        }
+        
+        if (!success) {
+          console.log("Falling back to default format");
+          mediaRecorderRef.current = new MediaRecorder(stream);
+          mimeType = mediaRecorderRef.current.mimeType;
+        }
       }
+      
+      console.log(`MediaRecorder created with mimeType: ${mimeType || 'default'}`);
       
       // Register data available handler
       mediaRecorderRef.current.ondataavailable = (event) => {
-        console.log(`Data available event, size: ${event.data.size}`);
+        console.log(`Data available event, size: ${event.data.size}, type: ${event.data.type}`);
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
@@ -373,10 +431,13 @@ const useAudioChat = (settings: ChildSettings) => {
         // Ensure data is available before proceeding
         if (audioChunksRef.current.length > 0) {
           try {
-            // Use the appropriate MIME type for the blob
-            const blobType = isSafari() ? 'audio/mp4' : 'audio/webm';
-            const blob = new Blob(audioChunksRef.current, { type: blobType });
-            console.log(`Created blob of size: ${blob.size} and type: ${blobType}`);
+            // Get the actual MIME type from the first chunk if available
+            const actualType = audioChunksRef.current[0].type || (isIOS() ? 'audio/mp4' : 'audio/webm');
+            console.log(`Creating blob with type: ${actualType}`);
+            
+            // Create the blob with the detected type
+            const blob = new Blob(audioChunksRef.current, { type: actualType });
+            console.log(`Created blob of size: ${blob.size} and type: ${blob.type}`);
             
             // Process the audio directly
             await processAudio(blob);
@@ -398,20 +459,19 @@ const useAudioChat = (settings: ChildSettings) => {
       
       // Start recording with short timeslice to get data frequently
       // iOS works better with shorter timeslices
-      const timeslice = isIOS() ? 500 : 1000;
+      const timeslice = isIOS() ? 300 : 1000;
       mediaRecorderRef.current.start(timeslice);
       setIsRecording(true);
       
-      // If this is the first recording, we'll request data right away
-      // This helps ensure the recorder initializes properly
-      if (isFirstRecordRef.current) {
+      // Request initial data chunk (important for iOS)
+      if (isIOS() || isFirstRecordRef.current) {
         setTimeout(() => {
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             console.log("Requesting first data chunk");
             mediaRecorderRef.current.requestData();
             isFirstRecordRef.current = false;
           }
-        }, 300);
+        }, 200);
       }
     } catch (error) {
       console.error('Error starting recording:', error);
