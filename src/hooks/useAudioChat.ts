@@ -4,6 +4,24 @@ import { ChildSettings } from '@/components/SettingsPanel';
 import { CHILD_CHAT_PROMPT } from '@/lib/config/prompts';
 import { getOpenAIApiKey, isOpenAIApiKeyConfigured } from '@/lib/config/env';
 
+// Helper to detect iOS
+const isIOS = (): boolean => {
+  return [
+    'iPad Simulator',
+    'iPhone Simulator',
+    'iPod Simulator',
+    'iPad',
+    'iPhone',
+    'iPod'
+  ].includes(navigator.platform) || 
+  (navigator.userAgent.includes("Mac") && "ontouchend" in document);
+};
+
+// Check if it's Safari browser
+const isSafari = (): boolean => {
+  return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+};
+
 const useAudioChat = (settings: ChildSettings) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -13,6 +31,8 @@ const useAudioChat = (settings: ChildSettings) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isFirstRecordRef = useRef<boolean>(true);
+  // Track if we've successfully initialized audio
+  const audioInitializedRef = useRef<boolean>(false);
 
   // Process audio function (wrapped in useCallback to maintain reference)
   const processAudio = useCallback(async (blob: Blob) => {
@@ -128,10 +148,20 @@ const useAudioChat = (settings: ChildSettings) => {
         const audioResponseBlob = new Blob([audioArrayBuffer], { type: 'audio/mp3' });
         const audioUrl = URL.createObjectURL(audioResponseBlob);
         
-        // Play the audio
+        // Play the audio - special handling for iOS Safari
         if (audioRef.current) {
           audioRef.current.src = audioUrl;
-          await audioRef.current.play();
+          
+          try {
+            // For iOS Safari, we need to play in response to a user gesture
+            await audioRef.current.play();
+          } catch (playError) {
+            console.error('Error playing audio:', playError);
+            // Fallback to browser speech synthesis
+            const msg = new SpeechSynthesisUtterance(responseText);
+            msg.lang = settings.language === 'german' ? 'de-DE' : 'en-US';
+            window.speechSynthesis.speak(msg);
+          }
         }
       } else {
         // Fallback to browser's speech synthesis if no audio is returned
@@ -159,30 +189,69 @@ const useAudioChat = (settings: ChildSettings) => {
     }
   }, [settings]);
 
+  // Function to initialize audio context (important for iOS)
+  const initAudioContext = useCallback(() => {
+    // Create audio context to initialize audio system (important for iOS)
+    try {
+      // @ts-ignore - AudioContext may not be defined in all environments
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (AudioContext) {
+        const audioContext = new AudioContext();
+        
+        // On iOS, we need to resume the audio context after creation
+        if (audioContext.state === 'suspended') {
+          audioContext.resume();
+        }
+        
+        // Create a silent oscillator to activate the audio system
+        const oscillator = audioContext.createOscillator();
+        oscillator.connect(audioContext.destination);
+        oscillator.start(0);
+        oscillator.stop(0.001); // Short duration
+        
+        return true;
+      }
+    } catch (e) {
+      console.error('Error initializing audio context:', e);
+    }
+    return false;
+  }, []);
+
   useEffect(() => {
     // Create an audio element for playback
     audioRef.current = new Audio();
     
-    // Initialize microphone access on mount
-    const initializeMicrophone = async () => {
-      try {
-        console.log("Initializing microphone on component mount");
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
-        
-        // Create a silent recorder and immediately stop it to initialize audio context
-        // This helps with some browsers that need a user gesture to initialize audio
-        const testRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-        testRecorder.start();
-        setTimeout(() => {
-          testRecorder.stop();
-        }, 100);
-      } catch (error) {
-        console.error('Error initializing microphone:', error);
+    // For iOS, we need to set up the audio element to be ready to play
+    if (isIOS()) {
+      if (audioRef.current) {
+        // iOS needs a user gesture to enable audio
+        audioRef.current.setAttribute('playsinline', '');
+        audioRef.current.setAttribute('webkit-playsinline', '');
+        audioRef.current.muted = false;
+        audioRef.current.volume = 1.0;
       }
-    };
-
-    initializeMicrophone();
+      
+      // For iOS, initialize audio context with user interaction
+      const handleUserInteraction = () => {
+        if (!audioInitializedRef.current) {
+          audioInitializedRef.current = initAudioContext();
+          // Also try to init mic on user interaction (iOS requires this)
+          initializeMicrophone();
+        }
+      };
+      
+      // Add event listeners for user interaction
+      document.addEventListener('touchstart', handleUserInteraction, { once: true });
+      document.addEventListener('click', handleUserInteraction, { once: true });
+      
+      return () => {
+        document.removeEventListener('touchstart', handleUserInteraction);
+        document.removeEventListener('click', handleUserInteraction);
+      };
+    } else {
+      // Non-iOS devices - initialize microphone on mount
+      initializeMicrophone();
+    }
     
     return () => {
       // Clean up
@@ -194,7 +263,56 @@ const useAudioChat = (settings: ChildSettings) => {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [initAudioContext]);
+
+  // Function to initialize microphone
+  const initializeMicrophone = async () => {
+    try {
+      console.log("Initializing microphone");
+      
+      // iOS Safari specific constraints
+      const constraints = {
+        audio: {
+          // Specific settings that work better on iOS
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100,
+        }
+      };
+      
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+      
+      console.log("Microphone initialized successfully");
+      
+      // For Safari/iOS, create a silent recorder to fully initialize the system
+      try {
+        const testRecorder = new MediaRecorder(stream, {
+          // Use different mime type for iOS/Safari
+          mimeType: isSafari() ? 'audio/mp4' : 'audio/webm'
+        });
+        testRecorder.start();
+        setTimeout(() => {
+          testRecorder.stop();
+        }, 100);
+      } catch (e) {
+        console.warn('Test recorder failed, trying alternative format', e);
+        // Try without mimeType specification (let browser choose)
+        const testRecorder = new MediaRecorder(stream);
+        testRecorder.start();
+        setTimeout(() => {
+          testRecorder.stop();
+        }, 100);
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error initializing microphone:', error);
+      toast.error("Could not access microphone. Please ensure permissions are granted in your browser settings and try again.");
+      return false;
+    }
+  };
 
   const startRecording = async () => {
     setAudioBlob(null);
@@ -203,29 +321,50 @@ const useAudioChat = (settings: ChildSettings) => {
     try {
       console.log(`Starting recording (first time: ${isFirstRecordRef.current})`);
       
+      // iOS specific handling
+      if (isIOS() && !audioInitializedRef.current) {
+        audioInitializedRef.current = initAudioContext();
+      }
+      
+      // Always request microphone access on start for iOS
+      if (isIOS() || !streamRef.current) {
+        const success = await initializeMicrophone();
+        if (!success) {
+          throw new Error("Could not access microphone. Please check permissions.");
+        }
+      }
+      
       // Use existing stream if available, otherwise request new one
       let stream = streamRef.current;
       if (!stream || stream.getTracks().some(track => !track.enabled || track.readyState !== 'live')) {
         console.log("Getting new media stream");
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        streamRef.current = stream;
+        const success = await initializeMicrophone();
+        if (!success) {
+          throw new Error("Could not access microphone. Please check permissions.");
+        }
+        stream = streamRef.current;
+        if (!stream) {
+          throw new Error("Could not initialize audio stream");
+        }
       }
       
-      // Create new MediaRecorder instance with specific mime type
-      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      try {
+        // Try to create MediaRecorder with specific mime type
+        const mimeType = isSafari() ? 'audio/mp4' : 'audio/webm';
+        mediaRecorderRef.current = new MediaRecorder(stream, { mimeType });
+      } catch (e) {
+        console.warn("Failed to create MediaRecorder with specific mime type, trying default", e);
+        // Fallback to browser default
+        mediaRecorderRef.current = new MediaRecorder(stream);
+      }
       
-      // Set up promise to wait for data
-      const dataAvailablePromise = new Promise<void>((resolve) => {
-        if (!mediaRecorderRef.current) return;
-        
-        mediaRecorderRef.current.ondataavailable = (event) => {
-          console.log(`Data available event, size: ${event.data.size}`);
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
-          }
-          resolve();
-        };
-      });
+      // Register data available handler
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        console.log(`Data available event, size: ${event.data.size}`);
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
       
       // Register stop event handler
       mediaRecorderRef.current.onstop = async () => {
@@ -233,32 +372,52 @@ const useAudioChat = (settings: ChildSettings) => {
         
         // Ensure data is available before proceeding
         if (audioChunksRef.current.length > 0) {
-          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          console.log(`Created blob of size: ${blob.size}`);
-          // Process the audio directly instead of setting state and waiting
-          await processAudio(blob);
+          try {
+            // Use the appropriate MIME type for the blob
+            const blobType = isSafari() ? 'audio/mp4' : 'audio/webm';
+            const blob = new Blob(audioChunksRef.current, { type: blobType });
+            console.log(`Created blob of size: ${blob.size} and type: ${blobType}`);
+            
+            // Process the audio directly
+            await processAudio(blob);
+          } catch (error) {
+            console.error("Error processing recording:", error);
+            toast.error("Error processing recording. Please try again.");
+          }
         } else {
-          toast.error("No audio recorded");
+          toast.error("No audio recorded. Please try speaking louder.");
         }
       };
       
+      // Set up error handler
+      mediaRecorderRef.current.onerror = (event) => {
+        console.error('MediaRecorder error:', event);
+        toast.error("Recording error occurred. Please try again.");
+        setIsRecording(false);
+      };
+      
       // Start recording with short timeslice to get data frequently
-      mediaRecorderRef.current.start(1000);
+      // iOS works better with shorter timeslices
+      const timeslice = isIOS() ? 500 : 1000;
+      mediaRecorderRef.current.start(timeslice);
       setIsRecording(true);
       
-      // If this is the first recording, we'll request a data chunk after a short delay
+      // If this is the first recording, we'll request data right away
       // This helps ensure the recorder initializes properly
       if (isFirstRecordRef.current) {
         setTimeout(() => {
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            console.log("Requesting first data chunk");
             mediaRecorderRef.current.requestData();
             isFirstRecordRef.current = false;
           }
-        }, 500);
+        }, 300);
       }
     } catch (error) {
       console.error('Error starting recording:', error);
-      toast.error("Could not access microphone. Please check permissions.");
+      toast.error(typeof error === 'object' && error !== null && 'message' in error 
+        ? (error as Error).message 
+        : "Could not access microphone. Please check permissions in your browser settings.");
       setIsRecording(false);
     }
   };
@@ -266,16 +425,21 @@ const useAudioChat = (settings: ChildSettings) => {
   const stopRecording = () => {
     console.log("Stopping recording");
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      // Request data before stopping
-      mediaRecorderRef.current.requestData();
-      
-      // Short delay to ensure data is available
-      setTimeout(() => {
-        if (mediaRecorderRef.current) {
-          mediaRecorderRef.current.stop();
-        }
+      try {
+        // Request data before stopping
+        mediaRecorderRef.current.requestData();
+        
+        // Short delay to ensure data is available
+        setTimeout(() => {
+          if (mediaRecorderRef.current) {
+            mediaRecorderRef.current.stop();
+          }
+          setIsRecording(false);
+        }, isIOS() ? 300 : 200); // Longer delay for iOS
+      } catch (error) {
+        console.error("Error stopping recorder:", error);
         setIsRecording(false);
-      }, 200);
+      }
     } else {
       setIsRecording(false);
     }
