@@ -124,7 +124,7 @@ const useAudioChat = (settings: ChildSettings) => {
           }
         ],
         temperature: 0.7,
-        max_tokens: 300
+        max_tokens: 1000
       };
       
       // Add audio settings only if using audio output
@@ -510,6 +510,7 @@ const useAudioChat = (settings: ChildSettings) => {
     isLoading,
     startRecording,
     stopRecording,
+    stream: streamRef.current,
   };
 };
 

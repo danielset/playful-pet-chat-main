@@ -35,7 +35,7 @@ const Index = () => {
   // Reference to settings drawer toggle button
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   
-  const { isRecording, isLoading, startRecording, stopRecording } = useAudioChat(settings);
+  const { isRecording, isLoading, startRecording, stopRecording, stream } = useAudioChat(settings);
 
   // Save settings to localStorage whenever they change
   useEffect(() => {
@@ -104,6 +104,7 @@ const Index = () => {
             isLoading={isLoading}
             onStart={handleStartRecording}
             onStop={stopRecording}
+            stream={stream}
           />
         </div>
       </main>
