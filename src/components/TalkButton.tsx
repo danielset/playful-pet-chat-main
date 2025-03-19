@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Rabbit } from 'lucide-react';
+import { Rabbit, Settings } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
 import LoadingSpinner from './LoadingSpinner';
 
@@ -9,6 +9,8 @@ interface TalkButtonProps {
   onStart: () => void;
   onStop: () => void;
   stream?: MediaStream | null;
+  usingAlternativeRecording?: boolean;
+  onToggleRecordingMethod?: () => void;
 }
 
 const TalkButton: React.FC<TalkButtonProps> = ({
@@ -17,6 +19,8 @@ const TalkButton: React.FC<TalkButtonProps> = ({
   onStart,
   onStop,
   stream,
+  usingAlternativeRecording = false,
+  onToggleRecordingMethod,
 }) => {
   const [isPressed, setIsPressed] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -75,6 +79,27 @@ const TalkButton: React.FC<TalkButtonProps> = ({
 
   return (
     <div className="flex flex-col items-center justify-center py-6">
+      {onToggleRecordingMethod && (
+        <div className="mb-4">
+          <button
+            onClick={onToggleRecordingMethod}
+            className={`px-3 py-1 rounded-md text-sm font-medium ${
+              usingAlternativeRecording 
+                ? 'bg-blue-500 text-white' 
+                : 'bg-gray-200 text-gray-800'
+            } hover:opacity-90 transition-colors`}
+            title="Switch recording method"
+          >
+            {usingAlternativeRecording ? 'Using Alternative Mode' : 'Using Standard Mode'}
+          </button>
+          <div className="text-xs text-gray-500 mt-1">
+            {usingAlternativeRecording 
+              ? "Using WAV audio format (better compatibility)" 
+              : "Using MP3/WebM format"}
+          </div>
+        </div>
+      )}
+      
       <button
         ref={buttonRef}
         className={buttonClasses}

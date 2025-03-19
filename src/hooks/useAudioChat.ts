@@ -28,6 +28,9 @@ const isValidAudioBlob = (blob: Blob): boolean => {
   return blob.size > 1024;
 };
 
+// Flag to use alternative recording method when MediaRecorder fails
+let useAlternativeRecording = isIOS();
+
 // Types for conversation management
 interface ConversationMessage {
   role: 'system' | 'user' | 'assistant';
@@ -38,6 +41,159 @@ interface ConversationMessage {
 }
 
 const CONVERSATION_TIMEOUT = 3 * 60 * 1000; // 3 minutes in milliseconds
+
+// Alternative recording setup for iOS using AudioContext
+interface AudioRecorder {
+  audioContext: AudioContext;
+  mediaStreamSource: MediaStreamAudioSourceNode | null;
+  recorder: ScriptProcessorNode | null;
+  recordingBuffer: Float32Array[];
+  isRecording: boolean;
+  sampleRate: number;
+  start: () => void;
+  stop: () => Promise<Blob>;
+}
+
+// Create an audio context recorder that works on Safari iOS
+const createAudioContextRecorder = (stream: MediaStream): AudioRecorder => {
+  // Create audio context
+  // @ts-ignore - Safari uses webkitAudioContext
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  const audioContext = new AudioContext();
+  const sampleRate = audioContext.sampleRate;
+  
+  console.log(`Created AudioContext with sample rate: ${sampleRate}Hz`);
+  
+  // Create a media stream source
+  const mediaStreamSource = audioContext.createMediaStreamSource(stream);
+  
+  // Create script processor for recording
+  // Newer AudioWorklet API is better but less compatible, so using ScriptProcessor for max compatibility
+  // Buffer size of 4096 gives good results for voice
+  const recorder = audioContext.createScriptProcessor(4096, 1, 1);
+  
+  // Storage for recorded audio data
+  const recordingBuffer: Float32Array[] = [];
+  
+  // Flag to track recording state
+  let isRecording = false;
+  
+  // Setup processing function for recording
+  recorder.onaudioprocess = (e) => {
+    if (!isRecording) return;
+    
+    // Get channel data from input buffer
+    const channelData = e.inputBuffer.getChannelData(0);
+    
+    // Make a copy of the data to store (important!)
+    const bufferCopy = new Float32Array(channelData.length);
+    bufferCopy.set(channelData);
+    
+    // Store the copied buffer
+    recordingBuffer.push(bufferCopy);
+  };
+  
+  // Start recording
+  const start = () => {
+    recordingBuffer.length = 0; // Clear previous recording
+    
+    // Connect nodes: mediaStreamSource -> recorder -> destination
+    mediaStreamSource.connect(recorder);
+    recorder.connect(audioContext.destination);
+    
+    isRecording = true;
+    console.log("AudioContext recorder started");
+  };
+  
+  // Stop recording and return audio as a blob
+  const stop = async (): Promise<Blob> => {
+    isRecording = false;
+    
+    // Disconnect nodes
+    if (mediaStreamSource && recorder) {
+      mediaStreamSource.disconnect(recorder);
+      recorder.disconnect();
+    }
+    
+    // Calculate total length of recorded audio
+    let totalLength = 0;
+    for (const buffer of recordingBuffer) {
+      totalLength += buffer.length;
+    }
+    
+    // Merge all buffers into a single Float32Array
+    const mergedBuffer = new Float32Array(totalLength);
+    let offset = 0;
+    for (const buffer of recordingBuffer) {
+      mergedBuffer.set(buffer, offset);
+      offset += buffer.length;
+    }
+    
+    console.log(`Recording complete: ${totalLength} samples (${totalLength / sampleRate}s at ${sampleRate}Hz)`);
+    
+    // Convert to WAV format
+    const wavBlob = encodeWavFile(mergedBuffer, sampleRate);
+    console.log(`WAV blob created: ${wavBlob.size} bytes`);
+    
+    return wavBlob;
+  };
+  
+  return {
+    audioContext,
+    mediaStreamSource,
+    recorder,
+    recordingBuffer,
+    isRecording,
+    sampleRate,
+    start,
+    stop
+  };
+};
+
+// Function to encode audio data as WAV file
+const encodeWavFile = (samples: Float32Array, sampleRate: number): Blob => {
+  // WAV file format requires specific headers
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  
+  // Write WAV header
+  // "RIFF" chunk descriptor
+  writeUTFBytes(view, 0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeUTFBytes(view, 8, 'WAVE');
+  
+  // "fmt " sub-chunk
+  writeUTFBytes(view, 12, 'fmt ');
+  view.setUint32(16, 16, true); // SubChunk1Size is 16
+  view.setUint16(20, 1, true); // PCM is format 1
+  view.setUint16(22, 1, true); // Num channels (mono)
+  view.setUint32(24, sampleRate, true); // Sample rate
+  view.setUint32(28, sampleRate * 2, true); // Byte rate (SampleRate * NumChannels * BitsPerSample/8)
+  view.setUint16(32, 2, true); // Block align (NumChannels * BitsPerSample/8)
+  view.setUint16(34, 16, true); // Bits per sample
+  
+  // "data" sub-chunk
+  writeUTFBytes(view, 36, 'data');
+  view.setUint32(40, samples.length * 2, true); // SubChunk2Size
+  
+  // Write audio data (convert float to int16)
+  const volume = 0.9; // Adjust volume to avoid clipping
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const sample = Math.max(-1, Math.min(1, samples[i] * volume)); // Clamp to -1..1
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true); // Convert to 16-bit signed int
+  }
+  
+  // Create blob and return
+  return new Blob([view], { type: 'audio/wav' });
+};
+
+// Helper to write string to DataView
+const writeUTFBytes = (view: DataView, offset: number, string: string) => {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+};
 
 const useAudioChat = (settings: ChildSettings) => {
   const [isRecording, setIsRecording] = useState(false);
@@ -51,6 +207,9 @@ const useAudioChat = (settings: ChildSettings) => {
   // Track if we've successfully initialized audio
   const audioInitializedRef = useRef<boolean>(false);
   
+  // Track alternative recorder
+  const altRecorderRef = useRef<AudioRecorder | null>(null);
+  
   // Conversation state
   const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
   const conversationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -58,6 +217,9 @@ const useAudioChat = (settings: ChildSettings) => {
   
   // Track data request interval to clean it up properly
   const dataRequestIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Track recording failures to auto-switch to alternative method
+  const recordingFailureCountRef = useRef<number>(0);
 
   // Function to properly release all audio resources
   const releaseAudioResources = useCallback(() => {
@@ -70,6 +232,29 @@ const useAudioChat = (settings: ChildSettings) => {
       } catch (e) {
         console.error("Error stopping recorder during cleanup:", e);
       }
+    }
+    
+    // Clean up alternative recorder if active
+    if (altRecorderRef.current && altRecorderRef.current.isRecording) {
+      try {
+        altRecorderRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping alternative recorder during cleanup:", e);
+      }
+      
+      // Close audio context
+      if (altRecorderRef.current.audioContext) {
+        try {
+          // @ts-ignore - close() might not be available in older browsers
+          if (altRecorderRef.current.audioContext.close) {
+            altRecorderRef.current.audioContext.close();
+          }
+        } catch (e) {
+          console.error("Error closing audio context:", e);
+        }
+      }
+      
+      altRecorderRef.current = null;
     }
     
     // Clear media recorder
@@ -584,12 +769,58 @@ const useAudioChat = (settings: ChildSettings) => {
     }
   };
 
+  // Function to handle recording with alternative method for iOS
+  const startAlternativeRecording = useCallback(() => {
+    if (!streamRef.current) {
+      console.error("No stream available for alternative recording");
+      return false;
+    }
+    
+    try {
+      // Create a new audio context recorder
+      altRecorderRef.current = createAudioContextRecorder(streamRef.current);
+      
+      // Start recording
+      altRecorderRef.current.start();
+      
+      console.log("Started alternative recording using AudioContext");
+      return true;
+    } catch (error) {
+      console.error("Failed to start alternative recording:", error);
+      return false;
+    }
+  }, []);
+  
+  // Stop alternative recording and get blob
+  const stopAlternativeRecording = useCallback(async (): Promise<Blob | null> => {
+    if (!altRecorderRef.current) {
+      console.error("No alternative recorder to stop");
+      return null;
+    }
+    
+    try {
+      // Stop recording and get the WAV blob
+      const wavBlob = await altRecorderRef.current.stop();
+      console.log(`Alternative recording stopped, created ${wavBlob.size} byte WAV blob`);
+      
+      if (wavBlob.size < 1024) {
+        console.warn("Alternative recording produced too small audio file");
+        return null;
+      }
+      
+      return wavBlob;
+    } catch (error) {
+      console.error("Error stopping alternative recording:", error);
+      return null;
+    }
+  }, []);
+
   const startRecording = async () => {
     setAudioBlob(null);
     audioChunksRef.current = [];
     
     try {
-      console.log(`Starting recording (first time: ${isFirstRecordRef.current}, iOS: ${isIOS()}, Safari: ${isSafari()})`);
+      console.log(`Starting recording (first time: ${isFirstRecordRef.current}, iOS: ${isIOS()}, Safari: ${isSafari()}, alternative: ${useAlternativeRecording})`);
       
       // iOS specific handling
       if (isIOS() && !audioInitializedRef.current) {
@@ -618,6 +849,19 @@ const useAudioChat = (settings: ChildSettings) => {
         }
       }
       
+      // If we're using the alternative recording method for iOS
+      if (isIOS() && useAlternativeRecording) {
+        const success = startAlternativeRecording();
+        if (success) {
+          setIsRecording(true);
+          return; // Exit early to use alternative recording
+        } else {
+          console.warn("Alternative recording failed, falling back to MediaRecorder");
+          // Fall through to regular MediaRecorder method
+        }
+      }
+      
+      // Regular MediaRecorder approach
       let mimeType: string;
       let recorderOptions: MediaRecorderOptions = {};
       
@@ -679,6 +923,18 @@ const useAudioChat = (settings: ChildSettings) => {
           console.log("Created MediaRecorder with default settings");
         } catch (fallbackError) {
           console.error("Critical error creating MediaRecorder:", fallbackError);
+          
+          // If on iOS, try alternative recording method
+          if (isIOS()) {
+            console.log("Switching to alternative recording method");
+            useAlternativeRecording = true;
+            const success = startAlternativeRecording();
+            if (success) {
+              setIsRecording(true);
+              return;
+            }
+          }
+          
           throw new Error("Your browser doesn't support audio recording in a compatible format. Please try a different browser.");
         }
       }
@@ -714,9 +970,9 @@ const useAudioChat = (settings: ChildSettings) => {
             
             // If we're on iOS and the type is not recognized or empty, use a compatible format
             if (isIOS() && (!actualType || actualType === 'audio/octet-stream')) {
-              actualType = 'audio/mp3'; // Changed from 'm4a' to 'mp3' for better compatibility
+              actualType = 'audio/wav';  // Changed to WAV for better compatibility
             } else if (!actualType) {
-              actualType = isIOS() ? 'audio/mp3' : 'audio/webm';
+              actualType = isIOS() ? 'audio/wav' : 'audio/webm';
             }
             
             console.log(`Creating blob with type: ${actualType}`);
@@ -734,10 +990,31 @@ const useAudioChat = (settings: ChildSettings) => {
             await processAudio(blob);
           } catch (error) {
             console.error("Error processing recording:", error);
+            
+            // Track failures to auto-switch to alternative method on iOS
+            if (isIOS() && !useAlternativeRecording) {
+              recordingFailureCountRef.current++;
+              if (recordingFailureCountRef.current >= 2) {
+                console.log("Multiple recording failures detected on iOS, switching to alternative recording method");
+                useAlternativeRecording = true;
+                toast.info("Switching to a more compatible recording method for iOS");
+              }
+            }
+            
             toast.error(error instanceof Error ? error.message : "Error processing recording. Please try again.");
           }
         } else {
           toast.error("No audio recorded. Please try speaking louder and ensure your microphone is working properly.");
+          
+          // Track empty recording failures on iOS
+          if (isIOS() && !useAlternativeRecording) {
+            recordingFailureCountRef.current++;
+            if (recordingFailureCountRef.current >= 2) {
+              console.log("Multiple empty recordings detected on iOS, switching to alternative recording method");
+              useAlternativeRecording = true;
+              toast.info("Switching to a more compatible recording method for iOS");
+            }
+          }
         }
       };
       
@@ -746,6 +1023,15 @@ const useAudioChat = (settings: ChildSettings) => {
         console.error('MediaRecorder error:', event);
         toast.error("Recording error occurred. Please try again.");
         setIsRecording(false);
+        
+        // Track errors on iOS to auto-switch to alternative method
+        if (isIOS() && !useAlternativeRecording) {
+          recordingFailureCountRef.current++;
+          if (recordingFailureCountRef.current >= 1) {
+            console.log("MediaRecorder error on iOS, switching to alternative recording method");
+            useAlternativeRecording = true;
+          }
+        }
       };
       
       // Start recording with short timeslice to get data frequently
@@ -802,7 +1088,7 @@ const useAudioChat = (settings: ChildSettings) => {
     }
   };
   
-  const stopRecording = () => {
+  const stopRecording = async () => {
     console.log("Stopping recording");
     
     // Clear data request interval first
@@ -811,6 +1097,28 @@ const useAudioChat = (settings: ChildSettings) => {
       dataRequestIntervalRef.current = null;
     }
     
+    // Check if we're using alternative recording method
+    if (isIOS() && useAlternativeRecording && altRecorderRef.current) {
+      try {
+        console.log("Stopping alternative recording");
+        const audioBlob = await stopAlternativeRecording();
+        
+        if (audioBlob) {
+          // Process the recorded audio
+          await processAudio(audioBlob);
+        } else {
+          toast.error("No audio recorded or recording was too short. Please try again.");
+        }
+      } catch (error) {
+        console.error("Error stopping alternative recording:", error);
+        toast.error("Error processing recording. Please try again.");
+      } finally {
+        setIsRecording(false);
+      }
+      return;
+    }
+    
+    // Regular MediaRecorder approach
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       try {
         // Request data before stopping (important for getting final chunks)
@@ -836,6 +1144,16 @@ const useAudioChat = (settings: ChildSettings) => {
                    audioChunksRef.current.every(chunk => chunk.size === 0)) {
                   console.warn("No valid audio chunks after recording stopped");
                   toast.error("No audio data was captured. Please try again and speak clearly.");
+                  
+                  // Track empty recording on iOS
+                  if (isIOS() && !useAlternativeRecording) {
+                    recordingFailureCountRef.current++;
+                    if (recordingFailureCountRef.current >= 2) {
+                      console.log("Multiple empty recordings detected, switching to alternative method");
+                      useAlternativeRecording = true;
+                      toast.info("Switching to a more compatible recording method");
+                    }
+                  }
                 }
               }, 300);
             }
@@ -851,6 +1169,19 @@ const useAudioChat = (settings: ChildSettings) => {
     }
   };
   
+  // Add reset button to force alternative recording method
+  const resetRecordingMethod = useCallback(() => {
+    useAlternativeRecording = !useAlternativeRecording;
+    console.log(`Recording method set to ${useAlternativeRecording ? 'alternative' : 'standard'}`);
+    toast.success(`Switched to ${useAlternativeRecording ? 'alternative' : 'standard'} recording mode`);
+    
+    // Reset failure counter
+    recordingFailureCountRef.current = 0;
+    
+    // Release any existing resources
+    releaseAudioResources();
+  }, [releaseAudioResources]);
+
   // Add event listeners for page visibility and unload to properly release microphone
   useEffect(() => {
     // Handler for when the page is hidden or being unloaded
@@ -897,6 +1228,8 @@ const useAudioChat = (settings: ChildSettings) => {
     stream: streamRef.current,
     clearConversation,
     hasActiveConversation: conversationMessages.length > 0,
+    resetRecordingMethod,
+    usingAlternativeRecording: useAlternativeRecording
   };
 };
 
