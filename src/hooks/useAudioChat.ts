@@ -28,6 +28,17 @@ const isValidAudioBlob = (blob: Blob): boolean => {
   return blob.size > 1024;
 };
 
+// Types for conversation management
+interface ConversationMessage {
+  role: 'system' | 'user' | 'assistant';
+  content?: string;
+  audio?: {
+    id?: string;
+  };
+}
+
+const CONVERSATION_TIMEOUT = 3 * 60 * 1000; // 3 minutes in milliseconds
+
 const useAudioChat = (settings: ChildSettings) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -39,12 +50,52 @@ const useAudioChat = (settings: ChildSettings) => {
   const isFirstRecordRef = useRef<boolean>(true);
   // Track if we've successfully initialized audio
   const audioInitializedRef = useRef<boolean>(false);
+  
+  // Conversation state
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
+  const conversationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastInteractionTimeRef = useRef<number>(Date.now());
+
+  // Reset conversation after timeout
+  const resetConversationIfNeeded = useCallback(() => {
+    const now = Date.now();
+    const timeSinceLastInteraction = now - lastInteractionTimeRef.current;
+    
+    if (timeSinceLastInteraction > CONVERSATION_TIMEOUT) {
+      console.log("Conversation timeout reached, resetting conversation");
+      setConversationMessages([]);
+      return true;
+    }
+    return false;
+  }, []);
+  
+  // Schedule conversation reset
+  const scheduleConversationReset = useCallback(() => {
+    // Clear any existing timeout
+    if (conversationTimeoutRef.current) {
+      clearTimeout(conversationTimeoutRef.current);
+    }
+    
+    // Set a new timeout
+    conversationTimeoutRef.current = setTimeout(() => {
+      const wasReset = resetConversationIfNeeded();
+      if (wasReset) {
+        toast.info("Starting a new conversation");
+      }
+    }, CONVERSATION_TIMEOUT);
+    
+    // Update last interaction time
+    lastInteractionTimeRef.current = Date.now();
+  }, [resetConversationIfNeeded]);
 
   // Process audio function (wrapped in useCallback to maintain reference)
   const processAudio = useCallback(async (blob: Blob) => {
     setIsLoading(true);
     
     try {
+      // Check if conversation should be reset due to timeout
+      resetConversationIfNeeded();
+      
       // Get API key from environment variable or settings
       const apiKey = getOpenAIApiKey() || settings.apiKey;
       
@@ -150,6 +201,41 @@ const useAudioChat = (settings: ChildSettings) => {
       const childName = settings.name ? `\n\nThe child's name is ${settings.name}.` : '';
       const languageContext = settings.language === 'german' ? "Please respond in German." : "Please respond in English.";
       
+      // System message for the model
+      const systemMessage: ConversationMessage = {
+        role: 'system',
+        content: `${promptForChild}${childName} ${languageContext} Keep responses short and engaging for children.`
+      };
+      
+      // Add current user message
+      const userMessage: ConversationMessage = {
+        role: 'user',
+        content: transcribedText
+      };
+      
+      // Prepare messages array for the API call
+      let messages: ConversationMessage[] = [];
+      
+      // Check if we have existing conversation to continue
+      if (conversationMessages.length > 0) {
+        // Use existing conversation
+        console.log("Continuing existing conversation with message count:", conversationMessages.length);
+        
+        // Add new user message to existing conversation
+        messages = [
+          systemMessage,
+          ...conversationMessages,
+          userMessage
+        ];
+      } else {
+        // Start new conversation
+        console.log("Starting new conversation");
+        messages = [
+          systemMessage,
+          userMessage
+        ];
+      }
+      
       // Choose the right model based on whether we want audio output or not
       // gpt-4o-audio-preview is required for audio modality
       const useAudioOutput = true; // Set to false to use only text output
@@ -158,16 +244,7 @@ const useAudioChat = (settings: ChildSettings) => {
       // Prepare the request body
       const requestBody: any = {
         model: model,
-        messages: [
-          {
-            role: 'system',
-            content: `${promptForChild}${childName} ${languageContext} Keep responses short and engaging for children.`
-          },
-          {
-            role: 'user',
-            content: transcribedText
-          }
-        ],
+        messages: messages,
         temperature: 0.7,
         max_tokens: 1000
       };
@@ -180,6 +257,8 @@ const useAudioChat = (settings: ChildSettings) => {
           format: 'mp3'
         };
       }
+      
+      console.log("Sending chat completion request with messages:", requestBody.messages);
       
       const chatResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -197,6 +276,38 @@ const useAudioChat = (settings: ChildSettings) => {
       
       const chatData = await chatResponse.json();
       const responseText = chatData.choices[0]?.message?.content || "";
+      
+      // Add user and assistant messages to conversation history
+      const newUserMessage: ConversationMessage = { role: 'user', content: transcribedText };
+      
+      // Check if there's an audio ID in the response
+      let newAssistantMessage: ConversationMessage = { 
+        role: 'assistant', 
+        content: responseText
+      };
+      
+      // Extract audio ID if available for future multi-turn conversations
+      if (chatData.choices[0]?.message?.audio?.id) {
+        const audioId = chatData.choices[0].message.audio.id;
+        console.log("Received audio ID for conversation continuity:", audioId);
+        newAssistantMessage.audio = { id: audioId };
+        
+        // If content is null (which can happen with audio responses), use the transcript
+        if (newAssistantMessage.content === null && chatData.choices[0].message.audio?.transcript) {
+          newAssistantMessage.content = chatData.choices[0].message.audio.transcript;
+        }
+      }
+      
+      // Update conversation history
+      const updatedConversation = [
+        ...conversationMessages,
+        newUserMessage,
+        newAssistantMessage
+      ];
+      setConversationMessages(updatedConversation);
+      
+      // Schedule conversation reset
+      scheduleConversationReset();
       
       // Get the audio data from the response if available
       if (useAudioOutput && chatData.choices[0]?.message?.audio?.data) {
@@ -252,7 +363,23 @@ const useAudioChat = (settings: ChildSettings) => {
     } finally {
       setIsLoading(false);
     }
-  }, [settings]);
+  }, [settings, conversationMessages, resetConversationIfNeeded, scheduleConversationReset]);
+  
+  // Clear conversation (can be called manually)
+  const clearConversation = useCallback(() => {
+    console.log("Manually clearing conversation");
+    setConversationMessages([]);
+    toast.info("Started a new conversation");
+  }, []);
+
+  // Reset conversation when settings change (important for language changes)
+  useEffect(() => {
+    // Reset conversation when language changes to avoid mixing languages in the same conversation
+    if (conversationMessages.length > 0) {
+      console.log("Settings changed, resetting conversation");
+      setConversationMessages([]);
+    }
+  }, [settings.language, settings.gender]);
 
   // Function to initialize audio context (important for iOS)
   const initAudioContext = useCallback(() => {
@@ -340,6 +467,10 @@ const useAudioChat = (settings: ChildSettings) => {
       // Clean up the stream
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      // Clear any conversation timeout
+      if (conversationTimeoutRef.current) {
+        clearTimeout(conversationTimeoutRef.current);
       }
     };
   }, [initAudioContext]);
@@ -648,6 +779,8 @@ const useAudioChat = (settings: ChildSettings) => {
     startRecording,
     stopRecording,
     stream: streamRef.current,
+    clearConversation,
+    hasActiveConversation: conversationMessages.length > 0,
   };
 };
 
