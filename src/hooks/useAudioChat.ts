@@ -55,6 +55,47 @@ const useAudioChat = (settings: ChildSettings) => {
   const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
   const conversationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastInteractionTimeRef = useRef<number>(Date.now());
+  
+  // Track data request interval to clean it up properly
+  const dataRequestIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Function to properly release all audio resources
+  const releaseAudioResources = useCallback(() => {
+    console.log("Releasing all audio resources");
+    
+    // Stop any ongoing recording
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping recorder during cleanup:", e);
+      }
+    }
+    
+    // Clear media recorder
+    mediaRecorderRef.current = null;
+    
+    // Release the microphone stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        try {
+          track.stop();
+          console.log("Audio track stopped");
+        } catch (e) {
+          console.error("Error stopping track:", e);
+        }
+      });
+      streamRef.current = null;
+    }
+    
+    // Clear any data request interval
+    if (dataRequestIntervalRef.current) {
+      clearInterval(dataRequestIntervalRef.current);
+      dataRequestIntervalRef.current = null;
+    }
+    
+    setIsRecording(false);
+  }, []);
 
   // Reset conversation after timeout
   const resetConversationIfNeeded = useCallback(() => {
@@ -115,38 +156,47 @@ const useAudioChat = (settings: ChildSettings) => {
       let processedBlob = blob;
       let filename = 'recording.webm';
       
-      // Determine the appropriate file extension based on MIME type
-      if (blob.type.includes('mp4')) {
-        filename = 'recording.mp4';
-      } else if (blob.type.includes('mp3')) {
-        filename = 'recording.mp3';
-      } else if (blob.type.includes('wav')) {
-        filename = 'recording.wav';
-      } else if (blob.type.includes('mpeg')) {
-        filename = 'recording.mpeg';
-      } else if (blob.type.includes('m4a')) {
-        filename = 'recording.m4a';
-      } else if (isIOS()) {
-        // Force a compatible extension for iOS if type is not recognized
-        // This helps when the MIME type is not standard but the data is valid
-        filename = 'recording.m4a';
+      // Convert to mp3 for iOS consistently - this format is very reliable with Whisper API
+      if (isIOS()) {
+        try {
+          // For iOS, always use mp3 as it's most reliable with Whisper
+          filename = 'recording.mp3';
+          
+          // If the blob type is not already mp3, explicitly set it
+          if (!blob.type.includes('mp3')) {
+            // Create a new blob with mp3 MIME type
+            processedBlob = new Blob([await blob.arrayBuffer()], { type: 'audio/mp3' });
+            console.log("Converted blob to audio/mp3 format for iOS");
+          }
+        } catch (e) {
+          console.error("Error converting blob format:", e);
+          // If conversion fails, try to use original with mp3 extension
+          processedBlob = blob;
+        }
+      } else {
+        // For non-iOS, use the original MIME type to determine extension
+        if (blob.type.includes('mp4')) {
+          filename = 'recording.mp4';
+        } else if (blob.type.includes('mp3')) {
+          filename = 'recording.mp3';
+        } else if (blob.type.includes('wav')) {
+          filename = 'recording.wav';
+        } else if (blob.type.includes('mpeg')) {
+          filename = 'recording.mpeg';
+        } else if (blob.type.includes('m4a')) {
+          filename = 'recording.m4a';
+        }
       }
       
-      console.log(`Sending audio with filename: ${filename} and type: ${blob.type}, size: ${blob.size} bytes`);
+      console.log(`Sending audio with filename: ${filename} and type: ${processedBlob.type}, size: ${processedBlob.size} bytes`);
       
       // 1. First convert audio to text using OpenAI Whisper API
       const formData = new FormData();
       
-      // Use a more explicit content type for iOS recordings if needed
-      if (isIOS() && !blob.type) {
-        // Create a new blob with explicit type if the original has none
-        processedBlob = new Blob([await blob.arrayBuffer()], { type: 'audio/m4a' });
-      }
-      
       formData.append('file', processedBlob, filename);
       formData.append('model', 'whisper-1');
       
-      // If language is specified, add it to the request
+      // Always include language parameter - important for reliable transcription
       if (settings.language === 'german') {
         formData.append('language', 'de');
       } else {
@@ -178,9 +228,16 @@ const useAudioChat = (settings: ChildSettings) => {
           console.error("Transcription error details:", errorData);
           errorMessage = errorData.error?.message || 'API error';
           
-          // Special handling for common iOS-related errors
-          if (errorMessage.includes("File is empty") || errorMessage.includes("Invalid file format")) {
-            errorMessage = "The recording format wasn't recognized. Please try again and speak clearly.";
+          // Better handling for common iOS-related errors with more user-friendly messages
+          if (errorMessage.includes("could not be decoded") || 
+              errorMessage.includes("File is empty") || 
+              errorMessage.includes("Invalid file format")) {
+            errorMessage = "The recording format wasn't recognized. Please try again with a stronger voice.";
+            
+            // If on iOS, provide more specific guidance
+            if (isIOS()) {
+              errorMessage += " Make sure you allow microphone access and speak clearly.";
+            }
           }
         } catch (e) {
           console.error("Failed to parse error response:", e);
@@ -576,7 +633,7 @@ const useAudioChat = (settings: ChildSettings) => {
         // Choose the most compatible format based on platform
         if (isIOS()) {
           // For iOS try formats in this order - these are most likely to work with Whisper API
-          const iosFormats = ['audio/mp4', 'audio/m4a', 'audio/aac', 'audio/wav'];
+          const iosFormats = ['audio/mp3', 'audio/mp4', 'audio/aac', 'audio/wav'];
           let formatFound = false;
           
           for (const format of iosFormats) {
@@ -657,9 +714,9 @@ const useAudioChat = (settings: ChildSettings) => {
             
             // If we're on iOS and the type is not recognized or empty, use a compatible format
             if (isIOS() && (!actualType || actualType === 'audio/octet-stream')) {
-              actualType = 'audio/m4a';
+              actualType = 'audio/mp3'; // Changed from 'm4a' to 'mp3' for better compatibility
             } else if (!actualType) {
-              actualType = isIOS() ? 'audio/m4a' : 'audio/webm';
+              actualType = isIOS() ? 'audio/mp3' : 'audio/webm';
             }
             
             console.log(`Creating blob with type: ${actualType}`);
@@ -699,18 +756,32 @@ const useAudioChat = (settings: ChildSettings) => {
       
       // For iOS, request data more frequently to avoid large chunks
       if (isIOS()) {
-        const dataRequestInterval = setInterval(() => {
+        // Clean up any existing interval first
+        if (dataRequestIntervalRef.current) {
+          clearInterval(dataRequestIntervalRef.current);
+          dataRequestIntervalRef.current = null;
+        }
+        
+        // Create new data request interval
+        dataRequestIntervalRef.current = setInterval(() => {
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             console.log("Requesting data chunk for iOS");
             mediaRecorderRef.current.requestData();
           } else {
-            clearInterval(dataRequestInterval);
+            // Automatically clean up if recorder is no longer active
+            if (dataRequestIntervalRef.current) {
+              clearInterval(dataRequestIntervalRef.current);
+              dataRequestIntervalRef.current = null;
+            }
           }
         }, 500); // Request data every 500ms on iOS
         
         // Clean up interval after 30 seconds max (typical max recording time)
         setTimeout(() => {
-          clearInterval(dataRequestInterval);
+          if (dataRequestIntervalRef.current) {
+            clearInterval(dataRequestIntervalRef.current);
+            dataRequestIntervalRef.current = null;
+          }
         }, 30000);
       } else if (isFirstRecordRef.current) {
         // Just for the first recording on non-iOS
@@ -733,6 +804,13 @@ const useAudioChat = (settings: ChildSettings) => {
   
   const stopRecording = () => {
     console.log("Stopping recording");
+    
+    // Clear data request interval first
+    if (dataRequestIntervalRef.current) {
+      clearInterval(dataRequestIntervalRef.current);
+      dataRequestIntervalRef.current = null;
+    }
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       try {
         // Request data before stopping (important for getting final chunks)
@@ -772,6 +850,44 @@ const useAudioChat = (settings: ChildSettings) => {
       setIsRecording(false);
     }
   };
+  
+  // Add event listeners for page visibility and unload to properly release microphone
+  useEffect(() => {
+    // Handler for when the page is hidden or being unloaded
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        console.log('Page is hidden, releasing audio resources');
+        
+        // If recording is in progress, stop it
+        if (isRecording) {
+          stopRecording();
+        }
+        
+        // Release resources when page is hidden
+        releaseAudioResources();
+      }
+    };
+    
+    // Handler for page unload
+    const handleBeforeUnload = () => {
+      console.log('Page is being unloaded, releasing audio resources');
+      releaseAudioResources();
+    };
+    
+    // Add visibility change listener
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    // Add page unload listeners
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload); // Especially important for iOS
+    
+    return () => {
+      // Remove listeners on cleanup
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, [isRecording, stopRecording, releaseAudioResources]);
   
   return {
     isRecording,
