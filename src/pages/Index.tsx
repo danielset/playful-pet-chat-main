@@ -35,15 +35,7 @@ const Index = () => {
   // Reference to settings drawer toggle button
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   
-  const { 
-    isRecording, 
-    isLoading, 
-    startRecording, 
-    stopRecording, 
-    stream, 
-    resetRecordingMethod,
-    usingAlternativeRecording
-  } = useAudioChat(settings);
+  const { isRecording, isLoading, startRecording, stopRecording, stream } = useAudioChat(settings);
 
   // Save settings to localStorage whenever they change
   useEffect(() => {
@@ -83,16 +75,6 @@ const Index = () => {
     // If settings are configured, start recording
     startRecording();
   };
-  
-  // Handle toggling between recording methods
-  const handleToggleRecordingMethod = () => {
-    if (isRecording || isLoading) {
-      toast.error("Cannot change recording method while active");
-      return;
-    }
-    
-    resetRecordingMethod();
-  };
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center relative p-4 overflow-hidden">
@@ -123,8 +105,6 @@ const Index = () => {
             onStart={handleStartRecording}
             onStop={stopRecording}
             stream={stream}
-            usingAlternativeRecording={usingAlternativeRecording}
-            onToggleRecordingMethod={handleToggleRecordingMethod}
           />
         </div>
       </main>
