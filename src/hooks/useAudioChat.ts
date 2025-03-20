@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { toast } from "sonner";
 import { ChildSettings } from '@/components/SettingsPanel';
-import { CHILD_CHAT_PROMPT } from '@/lib/config/prompts';
+import { CHILD_CHAT_PROMPT, RANDOM_CONVERSATION_PROMPT } from '@/lib/config/prompts';
 import { getOpenAIApiKey, isOpenAIApiKeyConfigured } from '@/lib/config/env';
+import { getRandomConversationStarter } from '@/lib/config/conversation-starters';
 
 // Helper to detect iOS
 const isIOS = (): boolean => {
@@ -888,12 +889,187 @@ const useAudioChat = (settings: ChildSettings) => {
       window.removeEventListener('pagehide', handleBeforeUnload);
     };
   }, [isRecording, stopRecording, releaseAudioResources]);
+
+  // Function to start a random conversation
+  const startRandomConversation = useCallback(async () => {
+    if (isRecording || isLoading) {
+      return; // Don't start if already recording or processing
+    }
+    
+    setIsLoading(true);
+    
+    try {
+      // Check if conversation should be reset due to timeout
+      resetConversationIfNeeded();
+      
+      // Get API key from environment variable or settings
+      const apiKey = getOpenAIApiKey() || settings.apiKey;
+      
+      // Check if API key is provided
+      if (!apiKey) {
+        throw new Error("Please provide an OpenAI API key in the settings");
+      }
+      
+      // Get a random conversation starter based on the language
+      const conversationStarter = getRandomConversationStarter(settings.language);
+      
+      // 2. Get system prompt for random conversations
+      const promptForRandomConversation = RANDOM_CONVERSATION_PROMPT[settings.language];
+      const childName = settings.name ? `\n\nThe child's name is ${settings.name}.` : '';
+      const languageContext = settings.language === 'german' ? "Please respond in German." : "Please respond in English.";
+      
+      // System message for the model
+      const systemMessage: ConversationMessage = {
+        role: 'system',
+        content: `${promptForRandomConversation}${childName} ${languageContext} Keep responses short and engaging for children.`
+      };
+      
+      // Add random conversation starter as user message
+      const userMessage: ConversationMessage = {
+        role: 'user',
+        content: conversationStarter
+      };
+      
+      // Prepare messages array for the API call
+      let messages: ConversationMessage[] = [
+        systemMessage,
+        userMessage
+      ];
+      
+      // Choose the right model
+      const useAudioOutput = true; // Set to false to use only text output
+      const model = useAudioOutput ? 'gpt-4o-audio-preview' : 'gpt-4o-mini';
+      
+      // Prepare the request body
+      const requestBody: any = {
+        model: model,
+        messages: messages,
+        temperature: 0.7,
+        max_tokens: 1000
+      };
+      
+      // Add audio settings only if using audio output
+      if (useAudioOutput) {
+        requestBody.modalities = ["text", "audio"];
+        requestBody.audio = { 
+          voice: settings.gender === 'girl' ? 'shimmer' : (settings.gender === 'boy' ? 'echo' : 'alloy'), 
+          format: 'mp3'
+        };
+      }
+      
+      console.log("Starting random conversation with topic:", conversationStarter);
+      console.log("Sending chat completion request with messages:", requestBody.messages);
+      
+      const chatResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!chatResponse.ok) {
+        const errorData = await chatResponse.json();
+        throw new Error(`Error from OpenAI: ${errorData.error?.message || 'Unknown error'}`);
+      }
+      
+      const chatData = await chatResponse.json();
+      const responseText = chatData.choices[0]?.message?.content || "";
+      
+      // Add user and assistant messages to conversation history
+      const newUserMessage: ConversationMessage = { role: 'user', content: conversationStarter };
+      
+      // Check if there's an audio ID in the response
+      let newAssistantMessage: ConversationMessage = { 
+        role: 'assistant', 
+        content: responseText
+      };
+      
+      // Extract audio ID if available for future multi-turn conversations
+      if (chatData.choices[0]?.message?.audio?.id) {
+        const audioId = chatData.choices[0].message.audio.id;
+        console.log("Received audio ID for conversation continuity:", audioId);
+        newAssistantMessage.audio = { id: audioId };
+        
+        // If content is null (which can happen with audio responses), use the transcript
+        if (newAssistantMessage.content === null && chatData.choices[0].message.audio?.transcript) {
+          newAssistantMessage.content = chatData.choices[0].message.audio.transcript;
+        }
+      }
+      
+      // Update conversation history
+      const updatedConversation = [
+        newUserMessage,
+        newAssistantMessage
+      ];
+      setConversationMessages(updatedConversation);
+      
+      // Schedule conversation reset
+      scheduleConversationReset();
+      
+      // Get the audio data from the response if available
+      if (useAudioOutput && chatData.choices[0]?.message?.audio?.data) {
+        // Convert base64 to blob
+        const audioData = chatData.choices[0].message.audio.data;
+        const audioBytes = atob(audioData);
+        const audioArrayBuffer = new ArrayBuffer(audioBytes.length);
+        const audioBufferView = new Uint8Array(audioArrayBuffer);
+        
+        for (let i = 0; i < audioBytes.length; i++) {
+          audioBufferView[i] = audioBytes.charCodeAt(i);
+        }
+        
+        const audioResponseBlob = new Blob([audioArrayBuffer], { type: 'audio/mp3' });
+        const audioUrl = URL.createObjectURL(audioResponseBlob);
+        
+        // Play the audio - special handling for iOS Safari
+        if (audioRef.current) {
+          audioRef.current.src = audioUrl;
+          
+          try {
+            // For iOS Safari, we need to play in response to a user gesture
+            await audioRef.current.play();
+          } catch (playError) {
+            console.error('Error playing audio:', playError);
+            // Fallback to browser speech synthesis
+            const msg = new SpeechSynthesisUtterance(responseText);
+            msg.lang = settings.language === 'german' ? 'de-DE' : 'en-US';
+            window.speechSynthesis.speak(msg);
+          }
+        }
+      } else {
+        // Fallback to browser's speech synthesis if no audio is returned
+        const msg = new SpeechSynthesisUtterance(responseText);
+        msg.lang = settings.language === 'german' ? 'de-DE' : 'en-US';
+        msg.pitch = 1.2;
+        msg.rate = 0.9;
+        window.speechSynthesis.speak(msg);
+      }
+      
+    } catch (error: any) {
+      console.error('Error starting random conversation:', error);
+      toast.error(error.message || "Error processing the random conversation request.");
+      
+      // Give a friendly fallback response using the browser's speech synthesis
+      const fallbackMsg = new SpeechSynthesisUtterance(
+        settings.language === 'german'
+          ? "Entschuldigung, ich konnte keine zufällige Unterhaltung starten. Bitte versuche es noch einmal."
+          : "Sorry, I couldn't start a random conversation. Please try again."
+      );
+      fallbackMsg.lang = settings.language === 'german' ? 'de-DE' : 'en-US';
+      window.speechSynthesis.speak(fallbackMsg);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [settings, resetConversationIfNeeded, scheduleConversationReset]);
   
   return {
     isRecording,
     isLoading,
     startRecording,
     stopRecording,
+    startRandomConversation,
     stream: streamRef.current,
     clearConversation,
     hasActiveConversation: conversationMessages.length > 0,

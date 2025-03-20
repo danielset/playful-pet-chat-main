@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import TalkButton from '@/components/TalkButton';
+import RandomButton from '@/components/RandomButton';
 import SettingsPanel, { ChildSettings } from '@/components/SettingsPanel';
 import useAudioChat from '@/hooks/useAudioChat';
 import { toast } from "sonner";
@@ -35,7 +36,14 @@ const Index = () => {
   // Reference to settings drawer toggle button
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   
-  const { isRecording, isLoading, startRecording, stopRecording, stream } = useAudioChat(settings);
+  const { 
+    isRecording, 
+    isLoading, 
+    startRecording, 
+    stopRecording, 
+    startRandomConversation, 
+    stream 
+  } = useAudioChat(settings);
 
   // Save settings to localStorage whenever they change
   useEffect(() => {
@@ -76,6 +84,29 @@ const Index = () => {
     startRecording();
   };
 
+  // Handle random conversation with settings check
+  const handleRandomConversation = () => {
+    if (!areSettingsConfigured()) {
+      // Show toast notification
+      toast.info("Please configure your settings first", {
+        description: "Opening settings panel...",
+        duration: 3000,
+      });
+      
+      // Programmatically click the settings button
+      setTimeout(() => {
+        if (settingsButtonRef.current) {
+          settingsButtonRef.current.click();
+        }
+      }, 500);
+      
+      return;
+    }
+    
+    // If settings are configured, start random conversation
+    startRandomConversation();
+  };
+
   return (
     <div className="min-h-screen flex flex-col items-center justify-center relative p-4 overflow-hidden">
       {/* Background elements */}
@@ -106,6 +137,19 @@ const Index = () => {
             onStop={stopRecording}
             stream={stream}
           />
+          
+          {/* Random conversation button */}
+          <div className="flex justify-center mt-4">
+            <div className="relative">
+              <RandomButton 
+                onClick={handleRandomConversation}
+                isLoading={isLoading}
+              />
+              <span className="absolute -bottom-6 left-1/2 transform -translate-x-1/2 whitespace-nowrap text-xs text-gray-500">
+                Random topic
+              </span>
+            </div>
+          </div>
         </div>
       </main>
       
