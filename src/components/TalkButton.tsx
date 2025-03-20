@@ -9,6 +9,7 @@ interface TalkButtonProps {
   onStart: () => void;
   onStop: () => void;
   stream?: MediaStream | null;
+  disabled?: boolean;
 }
 
 const TalkButton: React.FC<TalkButtonProps> = ({
@@ -17,28 +18,33 @@ const TalkButton: React.FC<TalkButtonProps> = ({
   onStart,
   onStop,
   stream,
+  disabled = false,
 }) => {
   const [isPressed, setIsPressed] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   // Handle mouse events for desktop
   const handleMouseDown = () => {
+    if (disabled) return;
     setIsPressed(true);
     onStart();
   };
 
   const handleMouseUp = () => {
+    if (disabled) return;
     setIsPressed(false);
     onStop();
   };
 
   // Handle touch events for mobile
   const handleTouchStart = () => {
+    if (disabled) return;
     setIsPressed(true);
     onStart();
   };
 
   const handleTouchEnd = () => {
+    if (disabled) return;
     setIsPressed(false);
     onStop();
   };
@@ -71,6 +77,7 @@ const TalkButton: React.FC<TalkButtonProps> = ({
     focus:outline-none focus:ring-4 focus:ring-kids-blue
     transform active:scale-95
     cursor-pointer select-none
+    ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
   `;
 
   return (
@@ -83,7 +90,7 @@ const TalkButton: React.FC<TalkButtonProps> = ({
         onMouseLeave={isPressed ? handleMouseUp : undefined}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
-        disabled={isLoading}
+        disabled={isLoading || disabled}
         aria-label="Push to talk"
       >
         {isLoading ? (

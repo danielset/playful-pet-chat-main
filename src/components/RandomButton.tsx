@@ -4,11 +4,13 @@ import { Shuffle } from 'lucide-react';
 interface RandomButtonProps {
   onClick: () => void;
   isLoading: boolean;
+  disabled?: boolean;
 }
 
 const RandomButton: React.FC<RandomButtonProps> = ({
   onClick,
   isLoading,
+  disabled = false,
 }) => {
   return (
     <button
@@ -19,10 +21,10 @@ const RandomButton: React.FC<RandomButtonProps> = ({
         hover:bg-kids-blue/90 focus:outline-none focus:ring-2 focus:ring-kids-blue
         transform hover:scale-105 active:scale-95
         cursor-pointer select-none flex items-center justify-center
-        ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}
+        ${isLoading || disabled ? 'opacity-50 cursor-not-allowed' : ''}
       `}
       onClick={onClick}
-      disabled={isLoading}
+      disabled={isLoading || disabled}
       aria-label="Start a random conversation"
       title="Start a random conversation"
     >
